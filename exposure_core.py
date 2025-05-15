@@ -133,9 +133,6 @@ def colorful_gradient_threshold(frames, step, threshold=0.5):
     return blended.astype('uint8')
 
     
-    
-
-
 def create_photo_blend(frames, short, step_cmd, alpha=0.5):
     """
     Blenduje priemerovaný obraz s gradientovým pomocou váhy alpha.
@@ -145,7 +142,7 @@ def create_photo_blend(frames, short, step_cmd, alpha=0.5):
     avg = create_photo_avg(frames, short)
     grad = create_photo_grad(frames, short, step_cmd)
 
-    # Previesť na float, aby sme mohli spraviť vážený súčet
+    # float conversion so we can do blending
     avg_float = avg.astype('float32')
     grad_float = grad.astype('float32')
 
@@ -165,32 +162,51 @@ def create_laplacian_pyramid(gaussian_pyramid):
     laplacian_pyramid = []
     for i in range(len(gaussian_pyramid) - 1):
         upsampled = cv2.pyrUp(gaussian_pyramid[i + 1])
+
+        # resize upsampled image to match the size of the current level
+        if upsampled.shape != gaussian_pyramid[i].shape:
+            upsampled = cv2.resize(upsampled, (gaussian_pyramid[i].shape[1], gaussian_pyramid[i].shape[0]))
+
         laplacian = cv2.subtract(gaussian_pyramid[i], upsampled)
         laplacian_pyramid.append(laplacian)
-    laplacian_pyramid.append(gaussian_pyramid[-1])  # Last level remains as is
+    
+    # append the last level of the Gaussian pyramid
+    laplacian_pyramid.append(gaussian_pyramid[-1])
     return laplacian_pyramid
 
-def blend_pyramids(pyramid1, pyramid2, alpha=0.5):
+def blend_pyramids(avg_pyramid, derivates_pyramid, mask_pyramid, alpha=0.5):
     blended_pyramid = []
-    for img1, img2 in zip(pyramid1, pyramid2):
-        blended_img = cv2.addWeighted(img1, 1.0 - alpha, img2, alpha, 0)
-        blended_pyramid.append(blended_img)
+    for avg, deriv, mask in zip(avg_pyramid, derivates_pyramid, mask_pyramid):
+        blended = mask * deriv + (1 - mask) * avg
+        blended_pyramid.append(blended)
+
     return blended_pyramid
 
 def reconstruct_from_pyramid(pyramid):
     image = pyramid[-1]
     for i in range(len(pyramid) - 2, -1, -1):
-        # Zvýšiť rozlíšenie obrazu na rovnakú veľkosť ako ďalšia úroveň pyramídy
+        # Upsample the image
         image = cv2.pyrUp(image)
         
-        # Ak majú obrázky rôzne rozmery, prispôsobíme veľkosť
+        # Resize the upsampled image to match the current level
         if image.shape != pyramid[i].shape:
             image = cv2.resize(image, (pyramid[i].shape[1], pyramid[i].shape[0]))
         
-        # Sčítať obrázok s aktuálnou úrovňou
+        # Add the current level of the pyramid
         image = cv2.add(image, pyramid[i])
         
     return image
+
+def create_mask_movement(grad_photo):
+    """Vytvori masku pomocou gradientu"""
+    sobel = cv2.Sobel(grad_photo, cv2.CV_64F, 1, 1, ksize=5)
+    sobel = cv2.convertScaleAbs(sobel)
+    greyscale_mask = cv2.cvtColor(sobel, cv2.COLOR_BGR2GRAY)
+    # make mask rgb as first immage for same dimensions
+    greyscale_mask = cv2.merge((greyscale_mask, greyscale_mask, greyscale_mask))
+    # save mask as mask.png
+    cv2.imwrite('./photos/mask.png', greyscale_mask)
+    return greyscale_mask
 
 def create_photo_blend_with_pyramids(frames, short, step_cmd, alpha=0.5, pyramid_levels=5):
     """
@@ -199,18 +215,27 @@ def create_photo_blend_with_pyramids(frames, short, step_cmd, alpha=0.5, pyramid
     alpha=1.0 -> čisto gradient
     pyramid_levels = počet úrovní pyramídy
     """
-    # Vytvorenie Gaussovej pyramídy pre priemerovanie a gradient
+    # creating average image
     avg = create_photo_avg(frames, short)
+    # and derivative image
     grad = create_photo_grad(frames, short, step_cmd)
 
-    # Vytvorenie Gaussových a Laplacových pyramíd
+    # creating mask
+    mask = create_mask_movement(grad)
+    # normalisation of the mask
+    mask = cv2.normalize(mask, None, 0, 1, cv2.NORM_MINMAX)
+
+    mask_pyramid = create_gaussian_pyramid(mask, levels=pyramid_levels)
+
+    # creating of gaussian and laplacian pyramids
     avg_pyramid = create_gaussian_pyramid(avg, levels=pyramid_levels)
     grad_pyramid = create_gaussian_pyramid(grad, levels=pyramid_levels)
+    avg_pyramid = create_laplacian_pyramid(avg_pyramid)
+    grad_pyramid = create_laplacian_pyramid(grad_pyramid)
+    # Blend pyramids
+    blended_pyramid = blend_pyramids(avg_pyramid, grad_pyramid, mask_pyramid, alpha=alpha)
 
-    # Zmiešanie pyramíd
-    blended_pyramid = blend_pyramids(avg_pyramid, grad_pyramid, alpha=alpha)
-
-    # Rekonštrukcia obrazu zo zmiešaných pyramíd
+    # reconstruct the blended image from the blended pyramid
     blended_image = reconstruct_from_pyramid(blended_pyramid)
 
     return blended_image.astype('uint8')
@@ -250,6 +275,4 @@ if __name__ == '__main__':
         result_image = create_photo_blend(frames, args.short, args.step, args.alpha)
     else:
         result_image = create_photo_avg(frames, args.short)
-
-
-    cv2.imwrite(output_path, result_image)        # For now, just print the shape of the first frame
+    cv2.imwrite(output_path, result_image)
